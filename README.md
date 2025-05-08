@@ -108,8 +108,37 @@ The extension maps DeeTEE CLI output to structured JSON responses. For example, 
 
 Since this extension executes Docker commands, it requires appropriate permissions. Ensure that the user running the application has Docker permissions.
 
-## Known Limitations
+## Cross-Platform Support
 
-- The current implementation assumes the DeeTEE CLI container is named "detee-cli"
-- Output parsing might need adjustments if the DeeTEE CLI output format changes
-- Only supports the actions defined in the original JSON configuration
+This extension is designed to work on both Windows and Unix-based systems:
+
+- **Windows**: Uses CMD or PowerShell when appropriate
+- **Unix**: Uses sh with bash commands
+
+The extension automatically detects the platform and adjusts commands and paths accordingly:
+
+```rust
+if cfg!(windows) {
+    // Windows-specific command
+    let command = "cmd /C docker ...";
+} else {
+    // Unix-specific command
+    let command = "docker ...";
+}
+```
+
+### Windows-Specific Details
+
+On Windows:
+- Container volume paths use Windows environment variables (%USERPROFILE%)
+- Directory creation uses PowerShell
+- Commands are executed through cmd.exe
+- Escaping is handled specifically for Windows command shell
+
+### Unix-Specific Details
+
+On Unix systems:
+- Container volume paths use Unix home directory expansion (~/)
+- Directory creation uses standard mkdir
+- Commands are executed directly
+- Escaping follows Unix shell patterns

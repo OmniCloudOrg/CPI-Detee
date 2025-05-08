@@ -99,17 +99,48 @@ impl DeeTeeExtension {
             default_settings,
         }
     }
+
+    // Ensure the required directories for the container exist on the host
+    fn ensure_container_directories(&self) -> Result<(), String> {
+        use std::fs;
+        use std::env;
+
+        let (cli_dir, ssh_dir) = if cfg!(windows) {
+            let userprofile = env::var("USERPROFILE").map_err(|e| format!("Failed to get USERPROFILE: {}", e))?;
+            (
+                format!("{}\\.detee\\container_volume\\cli", userprofile),
+                format!("{}\\.detee\\container_volume\\.ssh", userprofile),
+            )
+        } else {
+            let home = env::var("HOME").map_err(|e| format!("Failed to get HOME: {}", e))?;
+            (
+                format!("{}/.detee/container_volume/cli", home),
+                format!("{}/.detee/container_volume/.ssh", home),
+            )
+        };
+
+        fs::create_dir_all(&cli_dir).map_err(|e| format!("Failed to create directory {}: {}", cli_dir, e))?;
+        fs::create_dir_all(&ssh_dir).map_err(|e| format!("Failed to create directory {}: {}", ssh_dir, e))?;
+        Ok(())
+    }
     
     // Helper method to run commands through docker exec on the DeeTEE CLI container
     fn run_detee_cmd(&self, command: &str) -> Result<String, String> {
         println!("Running DeeTEE command: {}", command);
         
-        let parts: Vec<&str> = command.split_whitespace().collect();
-        let mut cmd_args = vec!["exec", "-i", "detee-cli"];
-        cmd_args.extend_from_slice(&parts);
+        let (cmd, args) = if cfg!(windows) {
+            // On Windows, we need to use cmd /C to run docker
+            ("cmd", vec!["/C", "docker", "exec", "-i", "detee-cli"].into_iter().chain(command.split_whitespace()).collect())
+        } else {
+            // On Unix systems, we can run docker directly
+            let parts: Vec<&str> = command.split_whitespace().collect();
+            let mut cmd_args = vec!["exec", "-i", "detee-cli"];
+            cmd_args.extend_from_slice(&parts);
+            ("docker", cmd_args)
+        };
         
-        let output = Command::new("docker")
-            .args(&cmd_args)
+        let output = Command::new(cmd)
+            .args(&args)
             .output()
             .map_err(|e| format!("Failed to execute DeeTEE command: {}", e))?;
             
@@ -127,9 +158,16 @@ impl DeeTeeExtension {
     fn run_shell_cmd(&self, command: &str) -> Result<String, String> {
         println!("Running shell command: {}", command);
         
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(command)
+        let (cmd, args) = if cfg!(windows) {
+            // On Windows, use cmd /C
+            ("cmd", vec!["/C", command])
+        } else {
+            // On Unix, use sh -c
+            ("sh", vec!["-c", command])
+        };
+        
+        let output = Command::new(cmd)
+            .args(&args)
             .output()
             .map_err(|e| format!("Failed to execute shell command: {}", e))?;
             
@@ -411,8 +449,25 @@ impl DeeTeeExtension {
         Ok(result)
     }
     
-    fn setup_container(&self) -> ActionResult {
-        let command = "docker run --pull always -dt --name detee-cli --volume ~/.detee/container_volume/cli:/root/.detee/cli:rw --volume ~/.detee/container_volume/.ssh:/root/.ssh:rw --entrypoint /usr/bin/fish detee/detee-cli:latest";
+fn setup_container(&self) -> ActionResult {
+        // First ensure the directories exist
+        self.ensure_container_directories()?;
+        
+        // Command to create the container
+        // The command is slightly different based on the platform
+        let command = if cfg!(windows) {
+            // On Windows, use PowerShell to create appropriate paths (with PowerShell style path expansions)
+            "docker run --pull always -dt --name detee-cli \
+             --volume %USERPROFILE%\\.detee\\container_volume\\cli:/root/.detee/cli:rw \
+             --volume %USERPROFILE%\\.detee\\container_volume\\.ssh:/root/.ssh:rw \
+             --entrypoint /usr/bin/fish detee/detee-cli:latest"
+        } else {
+            // On Unix, use standard path expansion
+            "docker run --pull always -dt --name detee-cli \
+             --volume ~/.detee/container_volume/cli:/root/.detee/cli:rw \
+             --volume ~/.detee/container_volume/.ssh:/root/.ssh:rw \
+             --entrypoint /usr/bin/fish detee/detee-cli:latest"
+        };
         
         let output = self.run_shell_cmd(command)?;
         
@@ -425,7 +480,14 @@ impl DeeTeeExtension {
     }
     
     fn setup_account(&self) -> ActionResult {
-        let command = "bash -c 'if [ ! -f /root/.ssh/id_ed25519.pub ]; then ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N \"}\" && detee-cli account ssh-pubkey-path /root/.ssh/id_ed25519.pub && detee-cli account brain-url http://164.92.249.180:31337'";
+        // Create the command with proper escaping for different platforms
+        let command = if cfg!(windows) {
+            // Windows needs different escaping
+            "bash -c \"if [ ! -f /root/.ssh/id_ed25519.pub ]; then ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N \\\"\\}\\\" && detee-cli account ssh-pubkey-path /root/.ssh/id_ed25519.pub && detee-cli account brain-url http://164.92.249.180:31337\""
+        } else {
+            // Unix command
+            "bash -c 'if [ ! -f /root/.ssh/id_ed25519.pub ]; then ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N \"}\" && detee-cli account ssh-pubkey-path /root/.ssh/id_ed25519.pub && detee-cli account brain-url http://164.92.249.180:31337'"
+        };
         
         let _ = self.run_detee_cmd(command)?;
         
